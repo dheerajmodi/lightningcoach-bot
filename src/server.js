@@ -429,11 +429,32 @@ function findContradictions(session) {
 
 async function send(to, body) {
   const toFmt = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
-  try {
-    await twilioClient.messages.create({ from: TWILIO_WHATSAPP_NUMBER, to: toFmt, body });
-  } catch (err) {
-    console.error(`Send failed:`, err.message);
+  // Split long messages into chunks under 1500 chars (WhatsApp limit is 1600)
+  const chunks = splitMessage(body, 1500);
+  for (const chunk of chunks) {
+    try {
+      await twilioClient.messages.create({ from: TWILIO_WHATSAPP_NUMBER, to: toFmt, body: chunk });
+      if (chunks.length > 1) await new Promise(r => setTimeout(r, 800)); // Small delay between chunks
+    } catch (err) {
+      console.error(`Send failed:`, err.message);
+    }
   }
+}
+
+function splitMessage(text, maxLen) {
+  if (text.length <= maxLen) return [text];
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) { chunks.push(remaining); break; }
+    // Find last newline before maxLen to split cleanly
+    let splitAt = remaining.lastIndexOf('\n', maxLen);
+    if (splitAt < maxLen * 0.5) splitAt = remaining.lastIndexOf('. ', maxLen);
+    if (splitAt < maxLen * 0.3) splitAt = maxLen;
+    chunks.push(remaining.substring(0, splitAt + 1).trim());
+    remaining = remaining.substring(splitAt + 1).trim();
+  }
+  return chunks;
 }
 
 function parseAnswer(text) {
@@ -469,46 +490,39 @@ async function generateReport(session) {
     .map(([d,s]) => `${d}: ${s.toFixed(1)}/5`)
     .join(', ');
 
-  const prompt = `You are a senior executive coach using the LightningCoach Adaptive Situational Leadership Assessment (ASLA) framework.
+  const prompt = `You are a senior executive coach using the LightningCoach ASLA framework.
 
-${session.name} (${session.role}, ${session.teamSize || 'unknown'} team, ${session.industry || 'unknown'} industry) completed a personalized 12-question adaptive assessment.
+${session.name} (${session.role}, ${session.teamSize || ''} team, ${session.industry || ''} industry) completed an adaptive assessment.
 
-Their responses:
-${answerDetails}
+Responses: ${answerDetails}
 
-Archetype distribution: ${JSON.stringify(counts)}
-Primary: ${primary} ${primaryData.emoji}
-Secondary: ${secondary || 'None'} ${secondaryData ? secondaryData.emoji : ''}
+Primary: ${primary} ${primaryData.emoji} | Secondary: ${secondary || 'None'}
+Top dimensions: ${Object.entries(dimScores).sort((a,b) => b[1]-a[1]).slice(0,3).map(([d,s]) => d+':'+s.toFixed(1)).join(', ')}
+Weak dimensions: ${Object.entries(dimScores).sort((a,b) => a[1]-b[1]).slice(0,3).map(([d,s]) => d+':'+s.toFixed(1)).join(', ')}
+Contradiction: "${contradictions[0] || 'None'}"
+Challenge: "${session.keepUpAtNight}" | Want to improve: "${session.wantToImprove}"
 
-Dimension scores: ${dimSummary}
+Generate a SHORT WhatsApp teaser report. STRICT LIMIT: Under 900 characters total. This is a FREE preview — keep them wanting more.
 
-What keeps them up at night: "${session.keepUpAtNight}"
-Skill they want to improve: "${session.wantToImprove}"
+Format exactly like this:
 
-Contradiction detected: "${contradictions[0] || 'None detected'}"
+${primaryData.emoji} *${primaryData.name}* (with ${secondary || 'Balanced'} tendencies)
 
-Generate a WhatsApp leadership profile. Use *bold*. Keep under 500 words.
+[One punchy sentence about what this means for their role]
 
-Structure:
-1. "${primaryData.emoji} *${primaryData.name}*" header with secondary mentioned
-2. 2-sentence personalized description referencing their ROLE and INDUSTRY
-3. *Your Strengths* — top 2 based on highest dimension scores. Reference specific scenario choices as evidence.
-4. *Your Blind Spots* — top 2 based on lowest scores. Be specific and honest about the risk.
-5. *🔍 Pattern Detected* — use the contradiction I provided. Make it sharp and insightful.
-6. *⏱️ Response Insight* — if any response times are available, note where they hesitated vs responded instantly
-7. *🎯 This Week's Challenge* — ONE concrete action for tomorrow based on their weakest dimension + stated challenge
-8. Final mirror sentence in italics — one line capturing their leadership essence. Make it memorable enough to screenshot.
+💪 *Top Strength:* [Their #1 strength — one sentence with evidence from their choices]
 
-End with:
-"Reply *PRO* for detailed PDF report with 30-day coaching plan (₹999)
-Reply *TEAM* to assess your entire management team
-Reply *SHARE* to share with a colleague"
+⚠️ *Blind Spot:* [Their #1 weakness — honest, specific, one sentence]
 
-Be warm but unflinchingly honest. Reference their actual scenario choices — don't be generic.`;
+🔍 *Contradiction:* [The gap between their beliefs and their choices — this is the hook, make it sharp, 2 sentences max]
+
+_"[Mirror sentence — one memorable line about their leadership essence]"_
+
+STOP HERE. Do not add anything after the mirror sentence. I will add the upgrade CTA separately.`;
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 1200,
+    max_tokens: 500,
     messages: [{ role: 'user', content: prompt }],
   });
   return response.content[0].text.trim();
@@ -522,26 +536,122 @@ async function handleMessage(from, body) {
   let s = sessions[from];
   const msg = body.trim();
 
-  // Post-report commands
-  if (s && s.state === 'report_sent') {
-    const upper = msg.toUpperCase();
-    if (upper === 'PRO') {
-      await send(from, `🔥 *Pro Report — ₹999*\n\nIncludes:\n📄 2000-word deep analysis\n📊 All 10 dimensions scored with evidence\n🎯 Personalized 30-day coaching plan\n📈 Industry benchmarks\n🧬 Full archetype deep-dive\n\nReply *BUY* to get yours. ⚡`);
+  // ─── RATE LIMITING ───
+  if (s && s.lastMessageTime && (Date.now() - s.lastMessageTime) < 2000) {
+    return; // Ignore messages faster than 2 seconds apart (anti-spam)
+  }
+  if (s) s.lastMessageTime = Date.now();
+
+  // ─── ADMIN COMMANDS (only from your number) ───
+  const ADMIN_NUMBER = 'whatsapp:+919958355005';
+  if (from === ADMIN_NUMBER) {
+    // RESET own session
+    if (msg.toUpperCase() === 'ADMIN RESET') {
+      delete sessions[from];
+      await send(from, `🔧 Your session has been reset. Send *Hi* to start fresh.`);
       return;
     }
+    // RESET any number: "ADMIN RESET 919876543210"
+    if (msg.toUpperCase().startsWith('ADMIN RESET ')) {
+      const targetNum = msg.substring(12).trim();
+      const targetKey1 = `whatsapp:+${targetNum}`;
+      const targetKey2 = `whatsapp:${targetNum}`;
+      if (sessions[targetKey1]) { delete sessions[targetKey1]; await send(from, `🔧 Session reset for ${targetNum}`); }
+      else if (sessions[targetKey2]) { delete sessions[targetKey2]; await send(from, `🔧 Session reset for ${targetNum}`); }
+      else { await send(from, `No session found for ${targetNum}`); }
+      return;
+    }
+    // STATS
+    if (msg.toUpperCase() === 'ADMIN STATS') {
+      const all = Object.values(sessions);
+      const completed = all.filter(s => s.state === 'report_sent' || s.state === 'completed');
+      const proLeads = all.filter(s => s.email);
+      const archs = completed.reduce((a, s) => { if(s.archetype) a[s.archetype] = (a[s.archetype]||0)+1; return a; }, {});
+      await send(from,
+        `📊 *LightningCoach Stats*\n\n` +
+        `Total sessions: ${all.length}\n` +
+        `Completed reports: ${completed.length}\n` +
+        `Pro leads (with email): ${proLeads.length}\n\n` +
+        `*Archetype distribution:*\n` +
+        `${Object.entries(archs).map(([a,c]) => `${ARCHETYPES[a]?.emoji||''} ${a}: ${c}`).join('\n') || 'None yet'}\n\n` +
+        `*Pro leads:*\n` +
+        `${proLeads.map(s => `${s.name} — ${s.email} — ${s.archetype}`).join('\n') || 'None yet'}`
+      );
+      return;
+    }
+  }
+
+  // Post-report commands
+  if (s && (s.state === 'report_sent' || s.state === 'awaiting_email' || s.state === 'completed')) {
+    const upper = msg.toUpperCase();
+    
+    // PRO upgrade flow
+    if (upper === 'PRO' && s.state === 'report_sent') {
+      s.state = 'awaiting_email';
+      await send(from,
+        `🔥 *Pro Report — ₹999*\n\n` +
+        `Your detailed PDF report includes:\n` +
+        `📊 All 10 dimensions with scores\n` +
+        `🧬 Deep archetype analysis\n` +
+        `🎯 30-day coaching plan\n` +
+        `📈 Industry benchmarks\n\n` +
+        `Share your *email address* and I'll send you the payment link + report delivery details.`
+      );
+      return;
+    }
+    
+    // Collect email for PRO
+    if (s.state === 'awaiting_email' && msg.includes('@') && msg.includes('.')) {
+      s.email = msg.trim();
+      s.state = 'completed';
+      await send(from,
+        `✅ Got it! We'll send the payment link and your detailed Pro Report to *${s.email}*\n\n` +
+        `Our team will reach out within 24 hours. ⚡\n\n` +
+        `Thank you, ${s.name}!`
+      );
+      console.log(`💰 PRO LEAD: ${s.name} | ${s.email} | ${from} | Archetype: ${s.archetype}`);
+      return;
+    }
+    
+    if (s.state === 'awaiting_email') {
+      await send(from, `Please share a valid email address (e.g., you@company.com)`);
+      return;
+    }
+
     if (upper === 'TEAM') {
-      await send(from, `🔥 *Team Pack — ₹4,999 for 10 assessments*\n\n✅ Adaptive assessment for each manager\n✅ Team archetype map\n✅ Common blind spots\n✅ Development priorities\n\nReply with your *company name* and *number of managers*! ⚡`);
+      await send(from,
+        `🔥 *Team Pack — ₹4,999 for 10 assessments*\n\n` +
+        `✅ Pro report for each manager\n` +
+        `✅ Team archetype distribution\n` +
+        `✅ Common blind spots map\n\n` +
+        `Share your *email* and *company name* and we'll set it up!`
+      );
       return;
     }
     if (upper === 'SHARE') {
-      await send(from, `Share this link:\nhttps://wa.me/919958355005?text=Hi!%20I%20want%20to%20discover%20my%20leadership%20archetype\n\nOr forward this chat! ⚡`);
+      await send(from, `Share this link with anyone:\nhttps://wa.me/919958355005?text=Hi!%20I%20want%20to%20discover%20my%20leadership%20archetype\n\nOr just forward your report! ⚡`);
       return;
     }
-    if (upper === 'START' || upper === 'RESTART') { delete sessions[from]; }
-    else {
-      await send(from, `Hey ${s.name}! Your ${ARCHETYPES[s.archetype]?.emoji||'⚡'} report was delivered above.\n\nReply *PRO* for detailed PDF (₹999)\nReply *TEAM* for team assessments\nReply *START* for new assessment`);
+    
+    // Block free re-assessment — one per phone number
+    if (upper === 'START' || upper === 'RESTART') {
+      await send(from,
+        `${s.name}, you've already completed your assessment! 🙌\n\n` +
+        `Your archetype: *${ARCHETYPES[s.archetype]?.emoji || '⚡'} ${ARCHETYPES[s.archetype]?.name || ''}*\n\n` +
+        `👉 Reply *PRO* for your detailed PDF report (₹999)\n` +
+        `👉 Reply *TEAM* for team assessments\n` +
+        `👉 Reply *SHARE* to share with a colleague`
+      );
       return;
     }
+    
+    await send(from,
+      `Hey ${s.name}! Your report was delivered above.\n\n` +
+      `Reply *PRO* for detailed PDF (₹999)\n` +
+      `Reply *TEAM* for team assessments\n` +
+      `Reply *SHARE* to share`
+    );
+    return;
   }
 
   // New or restart
@@ -678,23 +788,35 @@ async function handleMessage(from, body) {
       await send(from,
         `Analyzing your 12 decisions across ${s.usedCats.length} leadership domains... 🧠\n\n` +
         `Primary pattern: *${archData.emoji} ${archData.name}*\n` +
-        `${secData ? `Secondary: *${secData.emoji} ${secData.name}*\n` : ''}` +
-        `\nGenerating your personalized Leadership Profile... ⏳`
+        `↳ ${archData.strength} — ${archData.risk}\n\n` +
+        `${secData ? `Secondary: *${secData.emoji} ${secData.name}*\n↳ ${secData.strength}\n\n` : ''}` +
+        `Your detailed Leadership Profile is coming right here in this chat. Hold tight... ⏳`
       );
 
       try {
         const report = await generateReport(s);
         if (report) {
+          // Send the teaser report
           await send(from, `⚡ *YOUR LEADERSHIP ARCHETYPE*\n━━━━━━━━━━━━━━━━━━━━━\n\n${report}`);
-          s.state = 'report_sent';
-
+          
+          // Send upgrade CTA as separate message after short delay
           setTimeout(async () => {
             await send(from,
-              `💪 *Your coaching journey starts now, ${s.name}!*\n\n` +
-              `I'll send you one challenge per week based on your ${archData.emoji} profile.\n\n` +
-              `First one arrives Monday. ⚡`
+              `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+              `📊 *Your full report includes:*\n` +
+              `• All 10 leadership dimensions scored\n` +
+              `• Deep archetype analysis\n` +
+              `• 30-day personalized coaching plan\n` +
+              `• Industry benchmarks\n` +
+              `• Start / Stop / Continue actions\n\n` +
+              `👉 Reply *PRO* to get the full PDF report (₹999)\n` +
+              `👉 Reply *TEAM* to assess your entire team (₹4,999)\n` +
+              `👉 Reply *SHARE* to share with a colleague`
             );
-          }, 30000);
+          }, 3000);
+          
+          s.state = 'report_sent';
+          s.reportSentAt = new Date();
         } else {
           await send(from, `Something went wrong. 😅 Reply *START* to try again.`);
           s.state = 'error';
