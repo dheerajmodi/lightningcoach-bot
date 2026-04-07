@@ -543,7 +543,7 @@ async function handleMessage(from, body) {
   if (s) s.lastMessageTime = Date.now();
 
   // ─── ADMIN COMMANDS (only from your number) ───
-  const ADMIN_NUMBER = 'whatsapp:+919958355005';
+  const ADMIN_NUMBER = 'whatsapp:+919810381986';
   if (from === ADMIN_NUMBER) {
     // RESET own session
     if (msg.toUpperCase() === 'ADMIN RESET') {
@@ -629,7 +629,7 @@ async function handleMessage(from, body) {
       return;
     }
     if (upper === 'SHARE') {
-      await send(from, `Share this link with anyone:\nhttps://wa.me/919958355005?text=Hi!%20I%20want%20to%20discover%20my%20leadership%20archetype\n\nOr just forward your report! ⚡`);
+      await send(from, `Share this link with anyone:\nhttps://wa.me/919810381986?text=Hi!%20I%20want%20to%20discover%20my%20leadership%20archetype\n\nOr just forward your report! ⚡`);
       return;
     }
     
