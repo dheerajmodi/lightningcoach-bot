@@ -1,10 +1,12 @@
-// ⚡ LIGHTNINGCOACH v4 — Adaptive Situational Assessment Engine
+// ⚡ LIGHTNINGCOACH v5 — Adaptive Assessment + Supabase + Web Reports
 // Features: 60+ scenario bank, role-based tracks, adaptive branching,
-// personalized scenarios, contradiction detection, response time tracking
+// personalized scenarios, contradiction detection, response time tracking,
+// Supabase persistent storage, unique report URLs
 
 const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -13,11 +15,87 @@ app.use(express.json());
 const {
   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER,
   ANTHROPIC_API_KEY, PORT = 3000,
+  SUPABASE_URL, SUPABASE_SERVICE_KEY,
 } = process.env;
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const sessions = {};
+
+// Generate short report ID
+function generateReportId() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 12; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return id;
+}
+
+// Save assessment to Supabase
+async function saveAssessment(session, from) {
+  try {
+    const reportId = generateReportId();
+    const dimScores = calculateDimScores(session);
+    const { primary, secondary } = calculateArchetype(session);
+    const contradictions = findContradictions(session);
+    const primaryData = ARCHETYPES[primary];
+    const overallScore = Object.values(dimScores).reduce((a,b) => a+b, 0) / Object.keys(dimScores).length;
+
+    // Upsert user
+    const phone = from.replace('whatsapp:', '').replace('+', '');
+    await supabase.from('users').upsert({
+      phone,
+      name: session.name,
+      role: session.role,
+      team_size: session.teamSize,
+      industry: session.industry,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'phone' });
+
+    // Insert assessment
+    const { data, error } = await supabase.from('assessments').insert({
+      report_id: reportId,
+      phone,
+      name: session.name,
+      role: session.role,
+      team_size: session.teamSize,
+      industry: session.industry,
+      archetype: primary,
+      archetype_emoji: primaryData?.emoji || '⚡',
+      secondary_archetype: secondary,
+      overall_score: parseFloat(overallScore.toFixed(1)),
+      score_decision_making: parseFloat((dimScores.Decision || 3).toFixed(1)),
+      score_delegation: parseFloat((dimScores.Delegation || 3).toFixed(1)),
+      score_conflict_resolution: parseFloat((dimScores.Conflict || 3).toFixed(1)),
+      score_strategic_clarity: parseFloat((dimScores.Strategic || 3).toFixed(1)),
+      score_accountability: parseFloat((dimScores.Accountability || 3).toFixed(1)),
+      score_people_development: parseFloat((dimScores.PeopleDev || 3).toFixed(1)),
+      score_adaptability: parseFloat((dimScores.Adaptability || 3).toFixed(1)),
+      score_communication: parseFloat((dimScores.Communication || 3).toFixed(1)),
+      score_resilience: parseFloat((dimScores.Resilience || 3).toFixed(1)),
+      score_innovation: parseFloat((dimScores.Innovation || 3).toFixed(1)),
+      top_strength: session.topStrength || '',
+      blind_spot: session.blindSpot || '',
+      contradiction: contradictions[0] || '',
+      mirror_sentence: session.mirrorSentence || '',
+      coaching_tip: session.coachingTip || '',
+      answers: JSON.stringify(session.answers),
+      scenarios_used: JSON.stringify(session.usedIds),
+      response_times: JSON.stringify(session.answers.map(a => a.responseTime)),
+      completed_at: new Date().toISOString()
+    }).select();
+
+    if (error) {
+      console.error('Supabase insert error:', error.message);
+      return null;
+    }
+    console.log(`✅ Assessment saved: ${reportId} for ${session.name}`);
+    return reportId;
+  } catch (err) {
+    console.error('Save assessment error:', err.message);
+    return null;
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // SCENARIO BANK — 60+ scenarios, 8 categories, 3 difficulty levels
@@ -796,21 +874,27 @@ async function handleMessage(from, body) {
       try {
         const report = await generateReport(s);
         if (report) {
+          // Save to Supabase and get report URL
+          const reportId = await saveAssessment(s, from);
+          s.reportId = reportId;
+          
           // Send the teaser report
           await send(from, `⚡ *YOUR LEADERSHIP ARCHETYPE*\n━━━━━━━━━━━━━━━━━━━━━\n\n${report}`);
           
-          // Send upgrade CTA as separate message after short delay
+          // Send report link + upgrade CTA as separate message after short delay
           setTimeout(async () => {
+            const reportUrl = reportId 
+              ? `\n🔗 *Your Visual Report:*\nhttps://lightningcoach.com/report.html?id=${reportId}\n`
+              : '';
             await send(from,
-              `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-              `📊 *Your full report includes:*\n` +
-              `• All 10 leadership dimensions scored\n` +
-              `• Deep archetype analysis\n` +
-              `• 30-day personalized coaching plan\n` +
-              `• Industry benchmarks\n` +
-              `• Start / Stop / Continue actions\n\n` +
-              `👉 Reply *PRO* to get the full PDF report (₹999)\n` +
-              `👉 Reply *TEAM* to assess your entire team (₹4,999)\n` +
+              `━━━━━━━━━━━━━━━━━━━━━${reportUrl}\n` +
+              `📊 *Unlock your full PRO report:*\n` +
+              `• All 10 dimensions with deep analysis\n` +
+              `• Contradiction breakdown\n` +
+              `• Your Mirror Sentence\n` +
+              `• PDF download\n\n` +
+              `👉 Reply *PRO* for full report (₹999)\n` +
+              `👉 Reply *TEAM* to assess your team (₹4,999)\n` +
               `👉 Reply *SHARE* to share with a colleague`
             );
           }, 3000);
@@ -845,18 +929,52 @@ app.post('/webhook', async (req, res) => {
   res.type('text/xml').send('<Response></Response>');
 });
 
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
   const all = Object.values(sessions);
+  // Get total from Supabase
+  let dbCount = 0;
+  try {
+    const { count } = await supabase.from('assessments').select('*', { count: 'exact', head: true });
+    dbCount = count || 0;
+  } catch(e) {}
   res.json({
     status: 'running',
-    service: 'LightningCoach v4 — Adaptive Engine',
+    service: 'LightningCoach v5 — Adaptive Engine + Supabase',
     scenarioBank: SCENARIOS.length,
     activeSessions: all.length,
     reportsGenerated: all.filter(s => s.state === 'report_sent').length,
+    totalAssessmentsInDB: dbCount,
+    supabase: SUPABASE_URL ? 'connected' : 'not configured',
     archetypeDistribution: all.filter(s => s.archetype).reduce((a, s) => {
       a[s.archetype] = (a[s.archetype] || 0) + 1; return a;
     }, {}),
   });
 });
 
-app.listen(PORT, () => console.log(`⚡ LightningCoach v4 — Adaptive Engine | ${SCENARIOS.length} scenarios | Port ${PORT}`));
+// API endpoint for report page to fetch assessment data
+app.get('/api/report/:reportId', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('assessments')
+      .select('*')
+      .eq('report_id', req.params.reportId)
+      .single();
+    
+    if (error || !data) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    
+    // Update report_viewed_at
+    await supabase.from('assessments')
+      .update({ report_viewed_at: new Date().toISOString() })
+      .eq('report_id', req.params.reportId);
+    
+    // Don't expose sensitive fields
+    const { phone, payment_id, ...safeData } = data;
+    res.json(safeData);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.listen(PORT, () => console.log(`⚡ LightningCoach v5 — Adaptive Engine + Supabase | ${SCENARIOS.length} scenarios | Port ${PORT}`));
