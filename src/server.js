@@ -668,12 +668,12 @@ async function handleMessage(from, body) {
       s.state = 'awaiting_email';
       await send(from,
         `🔥 *Pro Report — ₹999*\n\n` +
-        `Your detailed PDF report includes:\n` +
-        `📊 All 10 dimensions with scores\n` +
-        `🧬 Deep archetype analysis\n` +
-        `🎯 30-day coaching plan\n` +
-        `📈 Industry benchmarks\n\n` +
-        `Share your *email address* and I'll send you the payment link + report delivery details.`
+        `Your detailed report includes:\n` +
+        `📊 All 10 dimensions with deep analysis\n` +
+        `🧬 Contradiction breakdown\n` +
+        `🪞 Your Mirror Sentence\n` +
+        `📄 PDF download\n\n` +
+        `Share your *email address* and I'll send you the payment link.`
       );
       return;
     }
@@ -696,6 +696,18 @@ async function handleMessage(from, body) {
       return;
     }
 
+    if (upper === 'COACH') {
+      await send(from,
+        `🤝 *Connect With a Coach*\n\n` +
+        `We'll match you with an ICF-certified coach who specializes in your archetype.\n\n` +
+        `📧 Email us at *admin@lightningcoach.com* with:\n` +
+        `• Your name\n` +
+        `• Your archetype (${ARCHETYPES[s.archetype]?.emoji || ''} ${ARCHETYPES[s.archetype]?.name || ''})\n` +
+        `• What you'd like to work on\n\n` +
+        `We'll connect you within 48 hours. ⚡`
+      );
+      return;
+    }
     if (upper === 'TEAM') {
       await send(from,
         `🔥 *Team Pack — ₹4,999 for 10 assessments*\n\n` +
@@ -716,8 +728,8 @@ async function handleMessage(from, body) {
       await send(from,
         `${s.name}, you've already completed your assessment! 🙌\n\n` +
         `Your archetype: *${ARCHETYPES[s.archetype]?.emoji || '⚡'} ${ARCHETYPES[s.archetype]?.name || ''}*\n\n` +
-        `👉 Reply *PRO* for your detailed PDF report (₹999)\n` +
-        `👉 Reply *TEAM* for team assessments\n` +
+        `👉 Reply *PRO* for your detailed report (₹999)\n` +
+        `👉 Reply *COACH* to connect with an ICF coach\n` +
         `👉 Reply *SHARE* to share with a colleague`
       );
       return;
@@ -725,8 +737,8 @@ async function handleMessage(from, body) {
     
     await send(from,
       `Hey ${s.name}! Your report was delivered above.\n\n` +
-      `Reply *PRO* for detailed PDF (₹999)\n` +
-      `Reply *TEAM* for team assessments\n` +
+      `Reply *PRO* for detailed report (₹999)\n` +
+      `Reply *COACH* to connect with a coach\n` +
       `Reply *SHARE* to share`
     );
     return;
@@ -894,7 +906,7 @@ async function handleMessage(from, body) {
               `• Your Mirror Sentence\n` +
               `• PDF download\n\n` +
               `👉 Reply *PRO* for full report (₹999)\n` +
-              `👉 Reply *TEAM* to assess your team (₹4,999)\n` +
+              `👉 Reply *COACH* to connect with an ICF coach\n` +
               `👉 Reply *SHARE* to share with a colleague`
             );
           }, 3000);
